@@ -1004,7 +1004,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Returns typed backend-specific GPU context information for custom
     /// controls. The value is intentionally type-erased in this crate so the
     /// core UI crate does not depend on a rendering backend.
-    #[cfg(any(target_family = "wasm", target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(
+        target_family = "wasm",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "macos"
+    ))]
     fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         None
     }

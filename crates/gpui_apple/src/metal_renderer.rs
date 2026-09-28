@@ -1804,6 +1804,13 @@ impl MetalRenderer {
                     log::error!("Metal cannot draw unsupported surface source with size {size:?}");
                     continue;
                 }
+                // WGPU textures exist when gpui's `custom-gpu` feature is on; only
+                // the WGPU renderer (gpui_macos's `wgpu` feature) can draw them.
+                #[allow(unreachable_patterns)]
+                _ => {
+                    log::error!("Metal cannot draw WGPU texture surfaces");
+                    continue;
+                }
             };
 
             assert_eq!(

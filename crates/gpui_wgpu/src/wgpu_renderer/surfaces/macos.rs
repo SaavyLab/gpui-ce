@@ -4,6 +4,9 @@ use collections::FxHashMap;
 pub(in crate::wgpu_renderer) struct SurfaceCache {
     texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     surfaces: FxHashMap<usize, CachedSurface>,
+    /// Bindings for application-rendered WGPU textures.
+    #[cfg(feature = "custom-gpu")]
+    textures: FxHashMap<wgpu::Texture, SurfaceBinding>,
 }
 
 impl SurfaceCache {
@@ -24,6 +27,8 @@ impl SurfaceCache {
         Ok(Self {
             texture_cache,
             surfaces: FxHashMap::default(),
+            #[cfg(feature = "custom-gpu")]
+            textures: FxHashMap::default(),
         })
     }
 }
@@ -44,12 +49,23 @@ pub(super) fn retain_surface_cache(renderer: &WgpuRenderer, surfaces: &[PaintSur
             core_video_surface_key(image_buffer).ok()
         })
         .collect::<smallvec::SmallVec<[usize; 4]>>();
-    renderer
-        .resources()
-        .surface_cache
-        .borrow_mut()
-        .surfaces
-        .retain(|key, _| active_keys.contains(key));
+    let mut cache = renderer.resources().surface_cache.borrow_mut();
+    cache.surfaces.retain(|key, _| active_keys.contains(key));
+    #[cfg(feature = "custom-gpu")]
+    {
+        let active_textures = surfaces
+            .iter()
+            .filter_map(|surface| match &surface.source {
+                gpui::SurfaceSource::Texture { texture, .. } => {
+                    texture.downcast_ref::<wgpu::Texture>()
+                }
+                _ => None,
+            })
+            .collect::<smallvec::SmallVec<[&wgpu::Texture; 4]>>();
+        cache
+            .textures
+            .retain(|texture, _| active_textures.contains(&texture));
+    }
 }
 
 pub(super) fn draw_surfaces(
@@ -60,41 +76,54 @@ pub(super) fn draw_surfaces(
 ) -> frame::DrawResult {
     use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 
-    let mut keyed_surfaces = smallvec::SmallVec::<[(&PaintSurface, usize, f32); 4]>::new();
-    for (index, surface) in surfaces.iter().enumerate() {
-        let gpui::SurfaceSource::Surface(image_buffer) = &surface.source else {
-            log::error!("surface source cannot be imported by the macOS renderer");
-            return Err(frame::DrawError::ExternalSurface);
-        };
-        if image_buffer.get_pixel_format() != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
-            log::error!("unsupported CoreVideo surface pixel format");
-            return Err(frame::DrawError::ExternalSurface);
-        }
-        keyed_surfaces.push((
-            surface,
-            core_video_surface_key(image_buffer)?,
-            opacities.get(index).copied().unwrap_or(1.0),
-        ));
-    }
-
     let resources = renderer.resources();
     let mut cache = resources.surface_cache.borrow_mut();
 
-    for (surface, key, opacity) in keyed_surfaces {
-        let gpui::SurfaceSource::Surface(image_buffer) = &surface.source else {
-            return Err(frame::DrawError::ExternalSurface);
-        };
-        let mut imported = cache.surfaces.remove(&key).map(Ok).unwrap_or_else(|| {
-            create_core_video_surface(renderer, &cache.texture_cache, &image_buffer)
-        })?;
-        renderer.draw_surface_binding(
-            surface,
-            SurfaceColorFormat::Yuv,
-            opacity,
-            &mut imported.binding,
-            pass,
-        )?;
-        cache.surfaces.insert(key, imported);
+    for (index, surface) in surfaces.iter().enumerate() {
+        let opacity = opacities.get(index).copied().unwrap_or(1.0);
+        match &surface.source {
+            gpui::SurfaceSource::Surface(image_buffer) => {
+                if image_buffer.get_pixel_format() != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                {
+                    log::error!("unsupported CoreVideo surface pixel format");
+                    return Err(frame::DrawError::ExternalSurface);
+                }
+                let key = core_video_surface_key(image_buffer)?;
+                let mut imported = cache.surfaces.remove(&key).map(Ok).unwrap_or_else(|| {
+                    create_core_video_surface(renderer, &cache.texture_cache, image_buffer)
+                })?;
+                renderer.draw_surface_binding(
+                    surface,
+                    SurfaceColorFormat::Yuv,
+                    opacity,
+                    &mut imported.binding,
+                    pass,
+                )?;
+                cache.surfaces.insert(key, imported);
+            }
+            #[cfg(feature = "custom-gpu")]
+            gpui::SurfaceSource::Texture { texture, .. } => {
+                let Some(texture) = texture.downcast_ref::<wgpu::Texture>() else {
+                    log::error!("surface source is not a WGPU texture");
+                    return Err(frame::DrawError::ExternalSurface);
+                };
+                let binding = cache.textures.entry(texture.clone()).or_insert_with(|| {
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    SurfaceBinding::new(renderer, view.clone(), view)
+                });
+                renderer.draw_surface_binding(
+                    surface,
+                    SurfaceColorFormat::Rgba,
+                    opacity,
+                    binding,
+                    pass,
+                )?;
+            }
+            _ => {
+                log::error!("surface source cannot be imported by the macOS renderer");
+                return Err(frame::DrawError::ExternalSurface);
+            }
+        }
     }
     Ok(())
 }
