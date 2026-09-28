@@ -70,8 +70,9 @@ impl MacWgpuRenderer {
         self.renderer.update_drawable_size(size);
     }
 
+    /// The surface's alpha mode sets the layer's opacity whenever WGPU
+    /// configures it, so it must not be set on the layer directly.
     pub fn update_transparency(&mut self, transparent: bool) {
-        self.layer.set_opaque(!transparent);
         self.renderer.update_transparency(transparent);
     }
 
@@ -104,8 +105,45 @@ impl MacWgpuRenderer {
         self.renderer.gpu_context_info()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
+    pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        self.renderer.render_to_image(scene)
+    }
+
+    // WGPU's offscreen rendering needs gpui_wgpu's test-support, which the
+    // `test-support` feature enables.
+    #[cfg(all(test, not(feature = "test-support")))]
     pub fn render_to_image(&mut self, _scene: &Scene) -> anyhow::Result<image::RgbaImage> {
-        anyhow::bail!("the WGPU renderer cannot capture macOS windows yet")
+        anyhow::bail!("rendering to an image needs the test-support feature")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparency_survives_resizing() {
+        let mut renderer = MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false);
+        assert!(renderer.layer.is_opaque());
+
+        renderer.update_transparency(true);
+        assert!(!renderer.layer.is_opaque());
+        renderer.update_drawable_size(gpui::size(DevicePixels(128), DevicePixels(96)));
+        assert!(!renderer.layer.is_opaque());
+
+        renderer.update_transparency(false);
+        renderer.update_drawable_size(gpui::size(DevicePixels(64), DevicePixels(64)));
+        assert!(renderer.layer.is_opaque());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn renders_scenes_to_images() {
+        let mut renderer = MacWgpuRenderer::new(Context::default(), gpui::size(32.0, 16.0), false);
+        let mut scene = Scene::default();
+        scene.finish();
+        let image = renderer.render_to_image(&scene).unwrap();
+        assert_eq!(image.dimensions(), (32, 16));
     }
 }

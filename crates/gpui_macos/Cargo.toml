@@ -15,7 +15,11 @@ path = "src/gpui_macos.rs"
 [features]
 default = ["gpui/default"]
 bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
-test-support = ["gpui/test-support", "gpui_apple/test-support"]
+test-support = [
+  "gpui/test-support",
+  "gpui_apple/test-support",
+  "gpui_wgpu?/test-support",
+]
 font-kit = ["dep:font-kit"]
 screen-capture = ["gpui/screen-capture", "dep:core-video"]
 # Draw windows with the WGPU renderer instead of Metal, so applications can
