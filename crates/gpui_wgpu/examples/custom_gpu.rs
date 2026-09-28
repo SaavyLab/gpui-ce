@@ -5,7 +5,12 @@
 //!
 //! Run with `--features custom-gpu` on supported targets.
 
-#[cfg(any(target_family = "wasm", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(
+    target_family = "wasm",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 mod custom_gpu {
     use std::borrow::Cow;
 
@@ -340,12 +345,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 }
 
-#[cfg(any(target_family = "wasm", target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(
+    target_family = "wasm",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 fn main() {
     custom_gpu::run();
 }
 
-#[cfg(not(any(target_family = "wasm", target_os = "linux", target_os = "freebsd")))]
+#[cfg(not(any(
+    target_family = "wasm",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 fn main() {
-    eprintln!("custom_gpu is supported on Linux, FreeBSD, and WASM targets only");
+    eprintln!("custom_gpu is supported on Linux, FreeBSD, macOS, and WASM targets only");
 }
