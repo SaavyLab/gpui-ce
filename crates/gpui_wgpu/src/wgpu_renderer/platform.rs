@@ -31,18 +31,59 @@ impl WgpuRenderer {
         let window_handle = window
             .window_handle()
             .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
+        Self::new_for_target(
+            gpu_context,
+            &|| Some(Box::new(window.clone())),
+            NativeSurfaceTarget::Window(window_handle.as_raw()),
+            config,
+            compositor_gpu,
+            extra_requirements,
+        )
+    }
 
+    /// Creates a renderer presenting to a `CAMetalLayer`, such as the backing
+    /// layer of a layer-backed `NSView`.
+    ///
+    /// # Safety
+    ///
+    /// `layer` must point to a valid `CAMetalLayer` that outlives the renderer.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn new_for_metal_layer(
+        gpu_context: GpuContext,
+        layer: *mut std::ffi::c_void,
+        config: WgpuSurfaceConfig,
+        extra_requirements: Option<WgpuDeviceRequirements>,
+    ) -> anyhow::Result<Self> {
+        Self::new_for_target(
+            gpu_context,
+            &|| None,
+            NativeSurfaceTarget::MetalLayer(layer),
+            config,
+            None,
+            extra_requirements,
+        )
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn new_for_target(
+        gpu_context: GpuContext,
+        display: DisplayHandleSource<'_>,
+        surface_target: NativeSurfaceTarget,
+        config: WgpuSurfaceConfig,
+        compositor_gpu: Option<CompositorGpuHint>,
+        extra_requirements: Option<WgpuDeviceRequirements>,
+    ) -> anyhow::Result<Self> {
         let mut context_slot = gpu_context.borrow_mut();
         let (context, surface) = match context_slot.as_mut() {
             Some(context) => {
-                let surface = create_surface(&context.instance, window_handle.as_raw())?;
+                let surface = create_surface(&context.instance, surface_target)?;
                 context.check_compatible_with_surface(&surface)?;
                 (context, surface)
             }
             None => {
                 let (context, surface) = initialize_context_and_surface(
-                    window,
-                    window_handle.as_raw(),
+                    display,
+                    surface_target,
                     compositor_gpu,
                     SoftwareAdapterPolicy::Allow,
                     extra_requirements.as_ref(),
@@ -152,7 +193,10 @@ impl WgpuRenderer {
         let window_handle = window
             .window_handle()
             .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
-        let surface = create_surface(instance, window_handle.as_raw())?;
+        let surface = create_surface(
+            instance,
+            NativeSurfaceTarget::Window(window_handle.as_raw()),
+        )?;
         // A replacement surface can expose different present modes (for example when a
         // window moves between displays or Wayland/X11 surfaces). Query the new surface,
         // rather than reusing capabilities from the old target.
@@ -211,6 +255,34 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
+        let window_handle = window
+            .window_handle()
+            .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
+        self.recover_target(
+            &|| Some(Box::new(window.clone())),
+            NativeSurfaceTarget::Window(window_handle.as_raw()),
+        )
+    }
+
+    /// Recovers a renderer made by [`Self::new_for_metal_layer`].
+    ///
+    /// # Safety
+    ///
+    /// `layer` must point to a valid `CAMetalLayer` that outlives the renderer.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn recover_metal_layer(
+        &mut self,
+        layer: *mut std::ffi::c_void,
+    ) -> anyhow::Result<()> {
+        self.recover_target(&|| None, NativeSurfaceTarget::MetalLayer(layer))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn recover_target(
+        &mut self,
+        display: DisplayHandleSource<'_>,
+        surface_target: NativeSurfaceTarget,
+    ) -> anyhow::Result<()> {
         let gpu_context = self.context.as_ref().expect("recover requires gpu_context");
         let needs_new_context = gpu_context
             .borrow()
@@ -233,16 +305,13 @@ impl WgpuRenderer {
             self.faults.recovery_not_before = None;
         }
 
-        let window_handle = window
-            .window_handle()
-            .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
             self.resources = None;
             *gpu_context.borrow_mut() = None;
             let (new_context, surface) = match initialize_context_and_surface(
-                window,
-                window_handle.as_raw(),
+                display,
+                surface_target,
                 self.compositor_gpu,
                 SoftwareAdapterPolicy::Reject,
                 self.extra_requirements.as_ref(),
@@ -262,7 +331,7 @@ impl WgpuRenderer {
                 .as_ref()
                 .expect("a recovered context must exist")
                 .instance;
-            create_surface(instance, window_handle.as_raw())?
+            create_surface(instance, surface_target)?
         };
 
         let config = self.target.recovery_config();
@@ -308,20 +377,32 @@ impl WgpuRenderer {
     }
 }
 
+/// Where a native renderer presents its frames.
 #[cfg(not(target_family = "wasm"))]
-fn initialize_context_and_surface<W>(
-    window: &W,
-    raw_window_handle: raw_window_handle::RawWindowHandle,
+#[derive(Clone, Copy)]
+enum NativeSurfaceTarget {
+    Window(raw_window_handle::RawWindowHandle),
+    /// A `CAMetalLayer` that outlives the renderer.
+    #[cfg(target_os = "macos")]
+    MetalLayer(*mut std::ffi::c_void),
+}
+
+/// The display handle a new wgpu instance is created with, if any; called once
+/// per backend attempted.
+#[cfg(not(target_family = "wasm"))]
+type DisplayHandleSource<'a> = &'a dyn Fn() -> Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>;
+
+#[cfg(not(target_family = "wasm"))]
+fn initialize_context_and_surface(
+    display: DisplayHandleSource<'_>,
+    surface_target: NativeSurfaceTarget,
     compositor_gpu: Option<CompositorGpuHint>,
     adapter_policy: SoftwareAdapterPolicy,
     extra_requirements: Option<&WgpuDeviceRequirements>,
-) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)>
-where
-    W: HasDisplayHandle + std::fmt::Debug + Clone + Send + Sync + 'static,
-{
+) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
     NativeBackend::try_in_preference_order("a GPU context for the window", |backend| {
-        let instance = backend.instance(Some(Box::new(window.clone())));
-        let surface = create_surface(&instance.raw, raw_window_handle)?;
+        let instance = backend.instance(display());
+        let surface = create_surface(&instance.raw, surface_target)?;
         let context = WgpuContext::new_with_adapter_policy(
             instance,
             &surface,
@@ -336,14 +417,23 @@ where
 #[cfg(not(target_family = "wasm"))]
 fn create_surface(
     instance: &wgpu::Instance,
-    raw_window_handle: raw_window_handle::RawWindowHandle,
+    surface_target: NativeSurfaceTarget,
 ) -> anyhow::Result<wgpu::Surface<'static>> {
+    let target = match surface_target {
+        NativeSurfaceTarget::Window(raw_window_handle) => wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: None,
+            raw_window_handle,
+        },
+        #[cfg(target_os = "macos")]
+        NativeSurfaceTarget::MetalLayer(layer) => {
+            wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer)
+        }
+    };
+    // SAFETY: window handles come from live windows, and callers of the
+    // Metal layer constructors guarantee the layer outlives the renderer.
     unsafe {
         instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: None,
-                raw_window_handle,
-            })
+            .create_surface_unsafe(target)
             .map_err(|error| anyhow::anyhow!("failed to create surface: {error}"))
     }
 }
