@@ -24,7 +24,6 @@ pub unsafe fn new_renderer(
 }
 
 pub struct MacWgpuRenderer {
-    // Declared before `layer` so the surface drops first.
     renderer: WgpuRenderer,
     layer: MetalLayer,
 }
@@ -41,11 +40,8 @@ impl MacWgpuRenderer {
             transparent,
             preferred_present_mode: None,
         };
-        // SAFETY: the renderer drops before the layer it presents to.
-        let renderer = unsafe {
-            WgpuRenderer::new_for_metal_layer(context, layer.as_ptr().cast(), config, None)
-        }
-        .expect("failed to create the WGPU renderer for a macOS window");
+        let renderer = WgpuRenderer::new_for_metal_layer(context, &layer, config, None)
+            .expect("failed to create the WGPU renderer for a macOS window");
         Self { renderer, layer }
     }
 
@@ -84,11 +80,7 @@ impl MacWgpuRenderer {
     /// whether the next frame must render the scene again, uncached.
     pub fn draw(&mut self, scene: &Scene) -> bool {
         if self.renderer.device_lost() {
-            // SAFETY: the renderer drops before the layer it presents to.
-            if let Err(error) = unsafe {
-                self.renderer
-                    .recover_metal_layer(self.layer.as_ptr().cast())
-            } {
+            if let Err(error) = self.renderer.recover_metal_layer(&self.layer) {
                 log::warn!("GPU recovery failed, will retry on next frame: {error}");
             }
             return true;

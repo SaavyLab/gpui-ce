@@ -42,22 +42,18 @@ impl WgpuRenderer {
     }
 
     /// Creates a renderer presenting to a `CAMetalLayer`, such as the backing
-    /// layer of a layer-backed `NSView`.
-    ///
-    /// # Safety
-    ///
-    /// `layer` must point to a valid `CAMetalLayer` that outlives the renderer.
+    /// layer of a layer-backed `NSView`. The surface retains the layer.
     #[cfg(target_os = "macos")]
-    pub unsafe fn new_for_metal_layer(
+    pub fn new_for_metal_layer(
         gpu_context: GpuContext,
-        layer: *mut std::ffi::c_void,
+        layer: &metal::MetalLayerRef,
         config: WgpuSurfaceConfig,
         extra_requirements: Option<WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
         Self::new_for_target(
             gpu_context,
             &|| None,
-            NativeSurfaceTarget::MetalLayer(layer),
+            NativeSurfaceTarget::metal_layer(layer),
             config,
             None,
             extra_requirements,
@@ -265,16 +261,9 @@ impl WgpuRenderer {
     }
 
     /// Recovers a renderer made by [`Self::new_for_metal_layer`].
-    ///
-    /// # Safety
-    ///
-    /// `layer` must point to a valid `CAMetalLayer` that outlives the renderer.
     #[cfg(target_os = "macos")]
-    pub unsafe fn recover_metal_layer(
-        &mut self,
-        layer: *mut std::ffi::c_void,
-    ) -> anyhow::Result<()> {
-        self.recover_target(&|| None, NativeSurfaceTarget::MetalLayer(layer))
+    pub fn recover_metal_layer(&mut self, layer: &metal::MetalLayerRef) -> anyhow::Result<()> {
+        self.recover_target(&|| None, NativeSurfaceTarget::metal_layer(layer))
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -382,9 +371,17 @@ impl WgpuRenderer {
 #[derive(Clone, Copy)]
 enum NativeSurfaceTarget {
     Window(raw_window_handle::RawWindowHandle),
-    /// A `CAMetalLayer` that outlives the renderer.
+    /// A live `CAMetalLayer`, which the surface retains.
     #[cfg(target_os = "macos")]
     MetalLayer(*mut std::ffi::c_void),
+}
+
+#[cfg(target_os = "macos")]
+impl NativeSurfaceTarget {
+    fn metal_layer(layer: &metal::MetalLayerRef) -> Self {
+        use metal::foreign_types::ForeignTypeRef as _;
+        Self::MetalLayer(layer.as_ptr().cast())
+    }
 }
 
 /// The display handle a new wgpu instance is created with, if any; called once
@@ -429,8 +426,8 @@ fn create_surface(
             wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer)
         }
     };
-    // SAFETY: window handles come from live windows, and callers of the
-    // Metal layer constructors guarantee the layer outlives the renderer.
+    // SAFETY: window handles come from live windows. Metal layers come from a
+    // `MetalLayerRef` borrowed for this call, and WGPU retains the layer.
     unsafe {
         instance
             .create_surface_unsafe(target)
