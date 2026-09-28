@@ -2155,6 +2155,11 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        #[cfg(feature = "wgpu")]
+        if this.renderer.draw(scene) {
+            this.force_render_pending = true;
+        }
+        #[cfg(not(feature = "wgpu"))]
         this.renderer.draw(scene);
     }
 
@@ -2163,7 +2168,19 @@ impl PlatformWindow for MacWindow {
     }
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
+        #[cfg(feature = "wgpu")]
+        return Some(self.0.lock().renderer.gpu_specs());
+        #[cfg(not(feature = "wgpu"))]
         None
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
+        self.0
+            .lock()
+            .renderer
+            .gpu_context_info()
+            .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {

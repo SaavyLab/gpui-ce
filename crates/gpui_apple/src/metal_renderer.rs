@@ -140,6 +140,25 @@ fn bind_instance_bytes(
     encoder.set_fragment_bytes(SIZES_SLOT, 4, &byte_len as *const u32 as *const _);
 }
 
+/// Creates the CAMetalLayer that backs a window's view. The renderer drawing
+/// into it sets its device and pixel format.
+pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
+    let layer = metal::MetalLayer::new();
+    // Support direct-to-display rendering if the window is not transparent
+    // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
+    layer.set_opaque(!transparent);
+    // `metal::MetalLayer` is a CAMetalLayer retained by the Metal crate.
+    // Reborrow its Objective-C object as the generated objc2 class to keep
+    // selector encodings and the autoresizing mask type checked here.
+    let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
+    layer_object.setAllowsNextDrawableTimeout(false);
+    layer_object.setNeedsDisplayOnBoundsChange(true);
+    layer_object.setAutoresizingMask(
+        CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+    );
+    layer
+}
+
 pub unsafe fn new_renderer(
     context: self::Context,
     _native_window: *mut c_void,
@@ -270,25 +289,13 @@ impl MetalRenderer {
     pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>, transparent: bool) -> Self {
         let device = Self::create_device();
 
-        let layer = metal::MetalLayer::new();
+        let layer = new_window_layer(transparent);
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        // Support direct-to-display rendering if the window is not transparent
-        // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
-        layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
         layer.set_framebuffer_only(false);
-        // `metal::MetalLayer` is a CAMetalLayer retained by the Metal crate.
-        // Reborrow its Objective-C object as the generated objc2 class to keep
-        // selector encodings and the autoresizing mask type checked here.
-        let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
-        layer_object.setAllowsNextDrawableTimeout(false);
-        layer_object.setNeedsDisplayOnBoundsChange(true);
-        layer_object.setAutoresizingMask(
-            CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-        );
 
         Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
     }
