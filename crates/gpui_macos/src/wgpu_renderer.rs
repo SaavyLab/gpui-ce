@@ -2,24 +2,37 @@
 //! feature. Applications can then share the window's device through
 //! `gpui_wgpu::WgpuContextHandle` and composite their own textures.
 
-use std::{ffi::c_void, sync::Arc};
+use std::sync::Arc;
 
 use foreign_types::ForeignType as _;
 use gpui::{DevicePixels, GpuSpecs, Scene, Size};
 use gpui_apple::metal_renderer::new_window_layer;
-use gpui_wgpu::{GpuContext, WgpuAtlas, WgpuContextHandle, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{
+    GpuContext, WgpuAtlas, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
+    WgpuSurfaceConfig, wgpu,
+};
 use metal::{CAMetalLayer, MetalLayer, MetalLayerRef};
 
-pub type Context = GpuContext;
+/// The device every window shares, and what the application requires of it.
+#[derive(Clone, Default)]
+pub struct Context {
+    gpu: GpuContext,
+    requirements: Option<WgpuDeviceRequirements>,
+}
+
+impl Context {
+    pub fn set_requirements(&mut self, requirements: WgpuDeviceRequirements) {
+        self.requirements = Some(requirements);
+    }
+}
+
 pub type Renderer = MacWgpuRenderer;
 
-pub unsafe fn new_renderer(
+pub fn new_renderer(
     context: Context,
-    _native_window: *mut c_void,
-    _native_view: *mut c_void,
     bounds: gpui::Size<f32>,
     transparent: bool,
-) -> Renderer {
+) -> anyhow::Result<Renderer> {
     MacWgpuRenderer::new(context, bounds, transparent)
 }
 
@@ -29,7 +42,7 @@ pub struct MacWgpuRenderer {
 }
 
 impl MacWgpuRenderer {
-    fn new(context: Context, bounds: gpui::Size<f32>, transparent: bool) -> Self {
+    fn new(context: Context, bounds: gpui::Size<f32>, transparent: bool) -> anyhow::Result<Self> {
         let layer = new_window_layer(transparent);
         let config = WgpuSurfaceConfig {
             // The view resizes this to device pixels once it knows its scale factor.
@@ -40,9 +53,9 @@ impl MacWgpuRenderer {
             transparent,
             preferred_present_mode: None,
         };
-        let renderer = WgpuRenderer::new_for_metal_layer(context, &layer, config, None)
-            .expect("failed to create the WGPU renderer for a macOS window");
-        Self { renderer, layer }
+        let renderer =
+            WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;
+        Ok(Self { renderer, layer })
     }
 
     pub fn layer(&self) -> Option<&MetalLayerRef> {
@@ -93,6 +106,14 @@ impl MacWgpuRenderer {
         self.renderer.gpu_specs()
     }
 
+    pub fn gpu_context(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+        self.renderer.gpu_context()
+    }
+
+    pub fn device_lost(&self) -> bool {
+        self.renderer.device_lost()
+    }
+
     pub fn gpu_context_info(&self) -> Option<WgpuContextHandle> {
         self.renderer.gpu_context_info()
     }
@@ -116,7 +137,8 @@ mod tests {
 
     #[test]
     fn transparency_survives_resizing() {
-        let mut renderer = MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false);
+        let mut renderer =
+            MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false).unwrap();
         assert!(renderer.layer.is_opaque());
 
         renderer.update_transparency(true);
@@ -132,7 +154,8 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn renders_scenes_to_images() {
-        let mut renderer = MacWgpuRenderer::new(Context::default(), gpui::size(32.0, 16.0), false);
+        let mut renderer =
+            MacWgpuRenderer::new(Context::default(), gpui::size(32.0, 16.0), false).unwrap();
         let mut scene = Scene::default();
         scene.finish();
         let image = renderer.render_to_image(&scene).unwrap();

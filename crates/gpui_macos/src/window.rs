@@ -1137,7 +1137,7 @@ impl MacWindow {
         cursor_visible: Arc<AtomicBool>,
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
-        renderer_context: renderer::Context,
+        renderer: renderer::Renderer,
         marker: MainThreadMarker,
     ) -> Self {
         unsafe {
@@ -1260,13 +1260,7 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
-                renderer: renderer::new_renderer(
-                    renderer_context,
-                    native_window as *mut _,
-                    native_view as *mut _,
-                    bounds.size.map(|pixels| pixels.as_f32()),
-                    false,
-                ),
+                renderer,
                 force_render_pending: false,
                 request_frame_callback: None,
                 event_callback: None,
@@ -2172,6 +2166,18 @@ impl PlatformWindow for MacWindow {
         return Some(self.0.lock().renderer.gpu_specs());
         #[cfg(not(feature = "wgpu"))]
         None
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        let (device, queue) = self.0.lock().renderer.gpu_context();
+        Some(Box::new((device, queue)))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn gpu_device_lost(&self) -> Option<bool> {
+        // Only loads an atomic flag, so it is safe mid-recovery.
+        Some(self.0.lock().renderer.device_lost())
     }
 
     #[cfg(feature = "wgpu")]

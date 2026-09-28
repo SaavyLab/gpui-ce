@@ -37,7 +37,7 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 
-use std::{cell::Cell, ffi::c_void, mem, ptr, sync::Arc};
+use std::{cell::Cell, mem, ptr, sync::Arc};
 
 // Use 4x MSAA, all devices support it.
 // https://developer.apple.com/documentation/metal/mtldevice/1433355-supportstexturesamplecount
@@ -159,14 +159,12 @@ pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
     layer
 }
 
-pub unsafe fn new_renderer(
+pub fn new_renderer(
     context: self::Context,
-    _native_window: *mut c_void,
-    _native_view: *mut c_void,
     _bounds: gpui::Size<f32>,
     transparent: bool,
-) -> Renderer {
-    MetalRenderer::new(context, transparent)
+) -> Result<Renderer> {
+    Ok(MetalRenderer::new(context, transparent))
 }
 
 pub struct InstanceBufferPool {
