@@ -434,3 +434,90 @@ fn create_surface(
             .map_err(|error| anyhow::anyhow!("failed to create surface: {error}"))
     }
 }
+
+#[cfg(all(test, target_os = "macos", feature = "test-support"))]
+mod tests {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use gpui::{Bounds, DevicePixels, Point, Quad, ScaledPixels, Size};
+
+    use super::*;
+
+    fn renderer(
+        context: &GpuContext,
+        layer: &metal::MetalLayerRef,
+    ) -> anyhow::Result<WgpuRenderer> {
+        WgpuRenderer::new_for_metal_layer(
+            Rc::clone(context),
+            layer,
+            WgpuSurfaceConfig {
+                size: Size {
+                    width: DevicePixels(2),
+                    height: DevicePixels(2),
+                },
+                transparent: false,
+                preferred_present_mode: None,
+            },
+            None,
+        )
+    }
+
+    fn red_scene() -> Scene {
+        let bounds = Bounds {
+            origin: Point {
+                x: ScaledPixels(0.0),
+                y: ScaledPixels(0.0),
+            },
+            size: Size {
+                width: ScaledPixels(2.0),
+                height: ScaledPixels(2.0),
+            },
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            bounds,
+            content_mask: gpui::ContentMask { bounds },
+            background: gpui::solid_background(gpui::red()),
+            ..Default::default()
+        });
+        scene.finish();
+        scene
+    }
+
+    #[test]
+    fn metal_layer_renderers_recover_onto_one_new_device() -> anyhow::Result<()> {
+        let context = GpuContext::default();
+        let (first_layer, second_layer) = (metal::MetalLayer::new(), metal::MetalLayer::new());
+        let mut first = renderer(&context, &first_layer)?;
+        let mut second = renderer(&context, &second_layer)?;
+        let (lost_device, _) = first.gpu_context();
+        assert!(Arc::ptr_eq(&lost_device, &second.gpu_context().0));
+
+        context
+            .borrow()
+            .as_ref()
+            .expect("the renderers' context")
+            .device_lost_flag()
+            .store(true, Ordering::Relaxed);
+        assert!(first.device_lost() && second.device_lost());
+
+        // The driver is given time to settle before the context is recreated.
+        assert!(first.recover_metal_layer(&first_layer).is_err());
+        assert!(first.device_lost());
+        std::thread::sleep(Duration::from_millis(400));
+        first.recover_metal_layer(&first_layer)?;
+        // The other window joins the context the first one recreated.
+        second.recover_metal_layer(&second_layer)?;
+
+        let (device, _) = first.gpu_context();
+        assert!(!Arc::ptr_eq(&device, &lost_device));
+        assert!(Arc::ptr_eq(&device, &second.gpu_context().0));
+        assert!(!first.device_lost() && !second.device_lost());
+        for renderer in [&mut first, &mut second] {
+            let image = renderer.render_to_image(&red_scene())?;
+            assert_eq!(image.get_pixel(1, 1).0, [255, 0, 0, 255]);
+        }
+        Ok(())
+    }
+}
