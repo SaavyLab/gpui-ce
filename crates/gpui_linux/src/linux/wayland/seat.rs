@@ -6,16 +6,17 @@ pub(crate) struct SeatGlobal {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SeatRemoval {
-    /// The seat in use is unaffected.
+    /// The primary seat is unaffected.
     Unaffected,
-    /// The seat in use is gone, and `replacement` takes its place if one is left.
+    /// The primary seat is gone, and `replacement` takes its place if one is left.
     InUse { replacement: Option<SeatGlobal> },
 }
 
-/// Helper for choosing which of the compositor's seats the client uses.
+/// Helper for choosing which of the compositor's seats is the client's primary seat.
 ///
-/// The client uses the first seat advertised and keeps it for as long as it exists. A seat
-/// added later, by the compositor or one of its plugins, must not take input away from it.
+/// The client takes pointer and keyboard input from every seat. The primary seat also owns the
+/// clipboard, drag and drop, text input and gestures. It is the first seat advertised, and
+/// stays the primary seat for as long as it exists.
 #[derive(Debug)]
 pub(crate) struct SeatSelection {
     // Oldest first
@@ -31,7 +32,7 @@ impl SeatSelection {
         }
     }
 
-    /// Returns the seat if the client should start using it.
+    /// Returns the seat if it becomes the primary seat.
     pub fn add(&mut self, seat: SeatGlobal) -> Option<SeatGlobal> {
         self.advertised.push(seat);
         if self.in_use.is_some() {
