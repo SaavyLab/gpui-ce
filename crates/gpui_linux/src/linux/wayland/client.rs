@@ -98,6 +98,7 @@ use crate::linux::{
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
+        seat::{SeatGlobal, SeatRemoval, SeatSelection},
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
         window::WaylandWindow,
@@ -328,6 +329,7 @@ pub(crate) struct WaylandClientState {
     pub compositor_gpu: Option<CompositorGpuHint>,
     pub gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
+    seat_selection: SeatSelection,
     wl_pointer: Option<wl_pointer::WlPointer>,
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
     hold_gesture: Option<zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1>,
@@ -445,6 +447,64 @@ impl WaylandClientState {
             return;
         };
         activation.activate(startup_activation_token, surface);
+    }
+
+    /// Binds a seat to replace one the compositor removed.
+    fn bind_seat(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        seat: SeatGlobal,
+        qh: &QueueHandle<WaylandClientStatePtr>,
+    ) {
+        let seat = registry.bind::<wl_seat::WlSeat, _, _>(
+            seat.name,
+            wl_seat_version(seat.version),
+            qh,
+            (),
+        );
+        self.data_device = self
+            .globals
+            .data_device_manager
+            .as_ref()
+            .map(|data_device_manager| data_device_manager.get_data_device(&seat, qh, ()));
+        self.primary_selection = self
+            .globals
+            .primary_selection_manager
+            .as_ref()
+            .map(|primary_selection_manager| primary_selection_manager.get_device(&seat, qh, ()));
+        self.globals.seat = seat.clone();
+        self.wl_seat = seat;
+    }
+
+    /// Releases the seat and everything created from it.
+    fn release_seat(&mut self) {
+        if let Some(pinch_gesture) = self.pinch_gesture.take() {
+            pinch_gesture.destroy();
+        }
+        if let Some(hold_gesture) = self.hold_gesture.take() {
+            hold_gesture.destroy();
+        }
+        if let Some(cursor_shape_device) = self.cursor_shape_device.take() {
+            cursor_shape_device.destroy();
+        }
+        if let Some(wl_pointer) = self.wl_pointer.take() {
+            wl_pointer.release();
+        }
+        if let Some(text_input) = self.text_input.take() {
+            text_input.destroy();
+            self.ime_pre_edit = None;
+            self.composing = false;
+        }
+        if let Some(wl_keyboard) = self.wl_keyboard.take() {
+            wl_keyboard.release();
+        }
+        if let Some(data_device) = self.data_device.take() {
+            data_device.release();
+        }
+        if let Some(primary_selection) = self.primary_selection.take() {
+            primary_selection.destroy();
+        }
+        self.wl_seat.release();
     }
 }
 
@@ -770,6 +830,7 @@ impl WaylandClient {
         let qh = event_queue.handle();
 
         let mut seat: Option<wl_seat::WlSeat> = None;
+        let mut seat_selection = SeatSelection::new();
         #[allow(clippy::mutable_key_type)]
         let mut in_progress_outputs = HashMap::default();
         #[allow(clippy::mutable_key_type)]
@@ -778,12 +839,17 @@ impl WaylandClient {
             for global in list {
                 match &global.interface[..] {
                     "wl_seat" => {
-                        seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
-                            global.name,
-                            wl_seat_version(global.version),
-                            &qh,
-                            (),
-                        ));
+                        if let Some(global) = seat_selection.add(SeatGlobal {
+                            name: global.name,
+                            version: global.version,
+                        }) {
+                            seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
+                                global.name,
+                                wl_seat_version(global.version),
+                                &qh,
+                                (),
+                            ));
+                        }
                     }
                     "wl_output" => {
                         let output = globals.registry().bind::<wl_output::WlOutput, _, _>(
@@ -915,6 +981,7 @@ impl WaylandClient {
             compositor_gpu,
             gpu_requirements: None,
             wl_seat: seat,
+            seat_selection,
             wl_pointer: None,
             wl_keyboard: None,
             pinch_gesture: None,
@@ -1390,19 +1457,9 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 version,
             } => match &interface[..] {
                 "wl_seat" => {
-                    if let Some(wl_pointer) = state.wl_pointer.take() {
-                        wl_pointer.release();
+                    if let Some(seat) = state.seat_selection.add(SeatGlobal { name, version }) {
+                        state.bind_seat(registry, seat, qh);
                     }
-                    if let Some(wl_keyboard) = state.wl_keyboard.take() {
-                        wl_keyboard.release();
-                    }
-                    state.wl_seat.release();
-                    state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(
-                        name,
-                        wl_seat_version(version),
-                        qh,
-                        (),
-                    );
                 }
                 "wl_output" => {
                     let output = registry.bind::<wl_output::WlOutput, _, _>(
@@ -1419,8 +1476,14 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 }
                 _ => {}
             },
-            wl_registry::Event::GlobalRemove { name: _ } => {
-                // TODO: handle global removal
+            wl_registry::Event::GlobalRemove { name } => {
+                // TODO: handle the removal of other globals
+                if let SeatRemoval::InUse { replacement } = state.seat_selection.remove(name) {
+                    state.release_seat();
+                    if let Some(seat) = replacement {
+                        state.bind_seat(registry, seat, qh);
+                    }
+                }
             }
             _ => {}
         }
