@@ -156,9 +156,26 @@ mod tests {
     fn renders_scenes_to_images() {
         let mut renderer =
             MacWgpuRenderer::new(Context::default(), gpui::size(32.0, 16.0), false).unwrap();
+        // A red quad over the left half.
+        let bounds = |width| gpui::Bounds {
+            origin: gpui::point(gpui::ScaledPixels(0.0), gpui::ScaledPixels(0.0)),
+            size: gpui::size(gpui::ScaledPixels(width), gpui::ScaledPixels(16.0)),
+        };
         let mut scene = Scene::default();
+        scene.insert_primitive(gpui::Quad {
+            bounds: bounds(16.0),
+            content_mask: gpui::ContentMask {
+                bounds: bounds(32.0),
+            },
+            background: gpui::solid_background(gpui::red()),
+            ..Default::default()
+        });
         scene.finish();
+
         let image = renderer.render_to_image(&scene).unwrap();
+
         assert_eq!(image.dimensions(), (32, 16));
+        assert_eq!(image.get_pixel(8, 8).0, [255, 0, 0, 255]);
+        assert_ne!(image.get_pixel(24, 8).0, [255, 0, 0, 255]);
     }
 }

@@ -294,6 +294,23 @@ mod tests {
     }
 
     #[test]
+    fn alpha_modes_follow_preference_then_the_first_supported() {
+        use wgpu::CompositeAlphaMode::{Inherit, Opaque, PostMultiplied, PreMultiplied};
+
+        assert_eq!(
+            select_alpha_modes(&[PostMultiplied, Opaque, PreMultiplied]),
+            Some((PreMultiplied, Opaque)),
+        );
+        assert_eq!(select_alpha_modes(&[Inherit]), Some((Inherit, Inherit)));
+        // Neither opaque preference is offered, so opaque windows take the
+        // first mode the surface supports.
+        assert_eq!(
+            select_alpha_modes(&[PostMultiplied]),
+            Some((PostMultiplied, PostMultiplied)),
+        );
+    }
+
+    #[test]
     fn no_alpha_modes_select_nothing() {
         assert_eq!(select_alpha_modes(&[]), None);
     }
