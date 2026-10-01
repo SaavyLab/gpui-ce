@@ -261,3 +261,152 @@ unsafe fn import_core_video_texture(
         )
     })
 }
+
+#[cfg(all(test, feature = "test-support", feature = "custom-gpu"))]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, Point, ScaledPixels, Scene, Size, SurfaceSource,
+    };
+
+    use super::*;
+    use crate::WgpuContext;
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+
+    /// A 4x2 renderer: a surface over its left half leaves the right half clear.
+    fn renderer() -> anyhow::Result<WgpuRenderer> {
+        let context = WgpuContext::new_headless(None)?;
+        WgpuRenderer::new_headless(
+            &context,
+            Size {
+                width: DevicePixels(4),
+                height: DevicePixels(2),
+            },
+        )
+    }
+
+    fn solid_texture(renderer: &WgpuRenderer, color: [u8; 4]) -> Arc<wgpu::Texture> {
+        let (device, queue) = renderer.gpu_context();
+        let size = wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("application_texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &color.repeat(4),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(2),
+            },
+            size,
+        );
+        Arc::new(texture)
+    }
+
+    /// A scene drawing each source over the renderer's left half.
+    fn scene(sources: impl IntoIterator<Item = SurfaceSource>) -> Scene {
+        let bounds = |width| Bounds {
+            origin: Point {
+                x: ScaledPixels(0.0),
+                y: ScaledPixels(0.0),
+            },
+            size: Size {
+                width: ScaledPixels(width),
+                height: ScaledPixels(2.0),
+            },
+        };
+        let mut scene = Scene::default();
+        for (order, source) in sources.into_iter().enumerate() {
+            scene.insert_primitive(PaintSurface {
+                order: order as u32,
+                bounds: bounds(2.0),
+                content_mask: ContentMask {
+                    bounds: bounds(4.0),
+                },
+                source,
+            });
+        }
+        scene.finish();
+        scene
+    }
+
+    fn texture_source(texture: &Arc<wgpu::Texture>) -> SurfaceSource {
+        SurfaceSource::Texture {
+            texture: texture.clone(),
+            size: Size {
+                width: DevicePixels(2),
+                height: DevicePixels(2),
+            },
+        }
+    }
+
+    fn cached_textures(renderer: &WgpuRenderer) -> Vec<wgpu::Texture> {
+        let cache = renderer.resources().surface_cache.borrow();
+        cache.textures.keys().cloned().collect()
+    }
+
+    #[test]
+    fn application_textures_composite_within_their_bounds() -> anyhow::Result<()> {
+        let mut renderer = renderer()?;
+        let clear = renderer.render_to_image(&scene([]))?.get_pixel(3, 1).0;
+        assert_ne!(clear, RED);
+        let texture = solid_texture(&renderer, RED);
+
+        let image = renderer.render_to_image(&scene([texture_source(&texture)]))?;
+
+        assert_eq!(image.get_pixel(0, 0).0, RED);
+        assert_eq!(image.get_pixel(1, 1).0, RED);
+        assert_eq!(image.get_pixel(2, 0).0, clear);
+        assert_eq!(image.get_pixel(3, 1).0, clear);
+        Ok(())
+    }
+
+    #[test]
+    fn texture_bindings_last_only_while_their_texture_is_drawn() -> anyhow::Result<()> {
+        let mut renderer = renderer()?;
+        let first = solid_texture(&renderer, RED);
+        let second = solid_texture(&renderer, RED);
+
+        // One binding per texture, reused across frames.
+        renderer.render_to_image(&scene([texture_source(&first)]))?;
+        renderer.render_to_image(&scene([texture_source(&first)]))?;
+        assert_eq!(cached_textures(&renderer), [(*first).clone()]);
+
+        // A texture the scene stops drawing is released, so an application
+        // that replaces its target (on resize) doesn't accumulate them.
+        renderer.render_to_image(&scene([texture_source(&second)]))?;
+        assert_eq!(cached_textures(&renderer), [(*second).clone()]);
+        renderer.render_to_image(&scene([]))?;
+        assert_eq!(cached_textures(&renderer), []);
+        Ok(())
+    }
+
+    #[test]
+    fn sources_that_are_not_wgpu_textures_fail_the_frame() -> anyhow::Result<()> {
+        let mut renderer = renderer()?;
+        let not_a_texture = SurfaceSource::Texture {
+            texture: Arc::new("not a texture"),
+            size: Size {
+                width: DevicePixels(2),
+                height: DevicePixels(2),
+            },
+        };
+
+        assert!(renderer.render_to_image(&scene([not_a_texture])).is_err());
+        Ok(())
+    }
+}
