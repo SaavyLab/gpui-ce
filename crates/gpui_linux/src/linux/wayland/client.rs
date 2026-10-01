@@ -98,6 +98,7 @@ use crate::linux::{
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
+        seat::{SeatGlobal, SeatRemoval, SeatSelection},
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
         window::WaylandWindow,
@@ -328,10 +329,7 @@ pub(crate) struct WaylandClientState {
     pub compositor_gpu: Option<CompositorGpuHint>,
     pub gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
-    /// The registry name of `wl_seat`, until the compositor removes that seat.
-    wl_seat_name: Option<u32>,
-    /// The registry name and version of every seat the compositor advertises, oldest first.
-    seat_globals: Vec<(u32, u32)>,
+    seat_selection: SeatSelection,
     wl_pointer: Option<wl_pointer::WlPointer>,
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
     hold_gesture: Option<zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1>,
@@ -455,11 +453,15 @@ impl WaylandClientState {
     fn bind_seat(
         &mut self,
         registry: &wl_registry::WlRegistry,
-        name: u32,
-        version: u32,
+        seat: SeatGlobal,
         qh: &QueueHandle<WaylandClientStatePtr>,
     ) {
-        let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, wl_seat_version(version), qh, ());
+        let seat = registry.bind::<wl_seat::WlSeat, _, _>(
+            seat.name,
+            wl_seat_version(seat.version),
+            qh,
+            (),
+        );
         self.data_device = self
             .globals
             .data_device_manager
@@ -472,7 +474,6 @@ impl WaylandClientState {
             .map(|primary_selection_manager| primary_selection_manager.get_device(&seat, qh, ()));
         self.globals.seat = seat.clone();
         self.wl_seat = seat;
-        self.wl_seat_name = Some(name);
     }
 
     /// Releases the seat and everything created from it.
@@ -504,7 +505,6 @@ impl WaylandClientState {
             primary_selection.destroy();
         }
         self.wl_seat.release();
-        self.wl_seat_name = None;
     }
 }
 
@@ -829,8 +829,8 @@ impl WaylandClient {
         let (globals, event_queue) = registry_queue_init::<WaylandClientStatePtr>(&conn).unwrap();
         let qh = event_queue.handle();
 
-        let mut seat: Option<(u32, wl_seat::WlSeat)> = None;
-        let mut seat_globals = Vec::new();
+        let mut seat: Option<wl_seat::WlSeat> = None;
+        let mut seat_selection = SeatSelection::new();
         #[allow(clippy::mutable_key_type)]
         let mut in_progress_outputs = HashMap::default();
         #[allow(clippy::mutable_key_type)]
@@ -839,19 +839,15 @@ impl WaylandClient {
             for global in list {
                 match &global.interface[..] {
                     "wl_seat" => {
-                        seat_globals.push((global.name, global.version));
-                        // Use the first seat the compositor advertises. A compositor, or one
-                        // of its plugins, can advertise further seats that carry no input
-                        // from the user.
-                        if seat.is_none() {
-                            seat = Some((
+                        if let Some(global) = seat_selection.add(SeatGlobal {
+                            name: global.name,
+                            version: global.version,
+                        }) {
+                            seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
                                 global.name,
-                                globals.registry().bind::<wl_seat::WlSeat, _, _>(
-                                    global.name,
-                                    wl_seat_version(global.version),
-                                    &qh,
-                                    (),
-                                ),
+                                wl_seat_version(global.version),
+                                &qh,
+                                (),
                             ));
                         }
                     }
@@ -914,7 +910,7 @@ impl WaylandClient {
             })
             .unwrap();
 
-        let (seat_name, seat) = seat.unwrap();
+        let seat = seat.unwrap();
         let globals = Globals::new(
             globals,
             common.foreground_executor.clone(),
@@ -985,8 +981,7 @@ impl WaylandClient {
             compositor_gpu,
             gpu_requirements: None,
             wl_seat: seat,
-            wl_seat_name: Some(seat_name),
-            seat_globals,
+            seat_selection,
             wl_pointer: None,
             wl_keyboard: None,
             pinch_gesture: None,
@@ -1462,10 +1457,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 version,
             } => match &interface[..] {
                 "wl_seat" => {
-                    state.seat_globals.push((name, version));
-                    // Keep the seat in use. An additional seat must not take input away from it.
-                    if state.wl_seat_name.is_none() {
-                        state.bind_seat(registry, name, version, qh);
+                    if let Some(seat) = state.seat_selection.add(SeatGlobal { name, version }) {
+                        state.bind_seat(registry, seat, qh);
                     }
                 }
                 "wl_output" => {
@@ -1485,11 +1478,10 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
             },
             wl_registry::Event::GlobalRemove { name } => {
                 // TODO: handle the removal of other globals
-                state.seat_globals.retain(|(seat, _)| *seat != name);
-                if state.wl_seat_name == Some(name) {
+                if let SeatRemoval::InUse { replacement } = state.seat_selection.remove(name) {
                     state.release_seat();
-                    if let Some((name, version)) = state.seat_globals.first().copied() {
-                        state.bind_seat(registry, name, version, qh);
+                    if let Some(seat) = replacement {
+                        state.bind_seat(registry, seat, qh);
                     }
                 }
             }
